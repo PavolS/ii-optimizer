@@ -1,0 +1,14 @@
+{
+    "beauty": {
+        "cost": { "initial": 4, "rate": 1.07},
+        "reward": { "duration": 0.6, "views": 1, "revenue": 1},
+        "multipliers": { "25": 3, "50": 2, "100": 10},
+        "level": 1
+    },
+    "gaming": {
+        "cost": { "initial": 60, "rate": 1.15},
+        "reward": { "duration": 3, "views": 20, "revenue": 3},
+        "multipliers": { "10": 2, "25": 3, "50": 5},
+        "level": 0
+    }
+}
