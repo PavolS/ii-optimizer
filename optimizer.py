@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import functools
 import json
-import sys
+import copy
 import math
-from pprint import pprint
 
 class Channel:
     def __init__(self, name, **kwargs):
@@ -27,9 +27,11 @@ class Channel:
         self.multiplier/=self.multipliers.get(self.lvl, 1)
         self.lvl-=1
 
+    @functools.lru_cache()
     def cost(self):
         return self.c0 * (self.r**self.lvl)
 
+    @functools.lru_cache()
     def cash_out(self):
         return self.views*self.p*self.multiplier*self.lvl
 
@@ -39,6 +41,7 @@ class Channel:
     def since_cash_out(self, t):
         return t % self.t
 
+    @functools.lru_cache()
     def income(self):
         return self.cash_out()/self.t
 
@@ -48,16 +51,77 @@ class Channel:
     def __repr__(self):
         return str(self)
 
+    def __hash__(self):
+        # NOTE: This is a perfect hash when combined with type and useless otherwise
+        return self.lvl
+
+class Channels:
+    def __init__(self, channels_iterable):
+        self._channels = list(c for c in channels_iterable)
+        self._channels_orig = copy.deepcopy(self._channels)
+
+    @property
+    def channels(self):
+        return self._channels
+
+    @property
+    def lvls(self):
+        return tuple(c.lvl for c in self.channels)
+
+    @functools.lru_cache()
+    def income(self):
+        return sum(c.income() for c in self.channels)
+
+    def upgrade(self, i):
+        self._channels[i].upgrade()
+
+    def degrade(self, i):
+        self._channels[i].degrade()
+
+    def get_time_and_money_for_next_cashout(self, t):
+         return min( (c.t - t % c.t, c.cash_out()) for c in self.channels)
+
+    @functools.lru_cache()
+    def min_cost(self):
+        return min(c.cost() for c in self.channels)
+
+    @functools.lru_cache()
+    def max_cost(self):
+        return max(c.cost() for c in self.channels)
+
+    def t_rems(self, t):
+        return tuple(math.floor( (t % c.t) * 10 ) for c in self.channels)
+
+    def __hash__(self):
+        return hash(self.lvls)
+
+    def upgradeAt(self, i, cash, t):
+        cu = self.channels[i]
+        #print("Upgrade {} for {}".format(i, cu.cost()))
+
+        while cash < cu.cost():
+            dt, dc = self.get_time_and_money_for_next_cashout(t)
+            cash += dc
+            t += dt + EPSILON
+        cu.upgrade()
+        cash-=cu.cost()
+        return cash, t
+
+    def print_path_result(self, path):
+        _channels = copy.deepcopy(self)
+        _channels._channels = copy.deepcopy(self._channels_orig)
+        for i, _t in path:
+            _channels.upgrade(i)
+        print("{:.1f}:\tIncome={:.0f}$/s channels={}".format(_t, _channels.income(), [ str(c) for c in _channels.channels]))
+        
 class LookupStorage:
     def __init__(self):
         self.data = {}
 
     def key(self, channels, cash, t):
-        _channels = (c.lvl for c in channels)
-        # _cash = math.floor(cash*100)
-        # _t = math.floor(t*100)
-        _cash = 0
-        _t = 0
+        _channels = channels.lvls
+        _cash = math.floor(cash % channels.max_cost() / channels.min_cost() )
+        _t = channels.t_rems(t)
         return (_t, _cash, _channels)
 
     def store(self, key, value):
@@ -67,87 +131,41 @@ class LookupStorage:
         key = self.key(channels, cash, t)
         return key, self.data.get(key)
 
-BOUND = 4
+BOUND = None
 EPSILON = 1e-3
-best = 1e99
+WORST = 1e999
+best = WORST
 mem = LookupStorage()
 
-def total_income(channels):
-    return sum(c.income() for c in channels)
-
-def _upgradeAt2(*args):
-    channels, i, cash, t, income = args
-    cu = channels[i]
-
-    if cash >= cu.cost():
-        cu.upgrade()
-        return cash - cu.cost(), t
-
-    dt0 = (cu.cost() - cash) / income
-    cash += sum( math.floor( (c.since_cash_out(t) + dt0) / c.t ) * c.cash_out() for c in channels )
-    t += dt0
-
-    return _upgradeAt(channels, i, cash, t, None)
-
-
-
-def _upgradeAt(*args):
-    channels, i, cash, t, _ = args
-    cu = channels[i]
-    #print("Upgrade {} for {}".format(i, cu.cost()))
-
-    while cash < cu.cost():
-        dt, dc = min( (c.t - t % c.t, c.cash_out()) for c in channels)
-        cash += dc
-        t += dt + EPSILON
-    cu.upgrade()
-    cash-=cu.cost()
-    return cash, t
-
-def _upgradeAt3(*args):
-    channels, i, cash, t, income = args
-    channels[i].upgrade()
-    return cash, t + channels[i].cost()/income
-
-UPGRADE_AT={
-    1: _upgradeAt,
-    2: _upgradeAt2,
-    3: _upgradeAt3
-}
-
-def optimize(channels, cash, t, path, upgradeAt):
+def optimize(channels, cash, t, path):
     global best
     global mem
 
     key, value = mem.lookup(channels, cash, t)
     if value:
-        print("MATCH!")
         return value
 
-    income = total_income(channels)
-
     if t > best:
-        return 1e99, path
+        return WORST, path
+
+    income = channels.income()
 
     if income < BOUND:
         options = []
-        for i, _ in enumerate(channels):
-            cash_new, t_new = upgradeAt(channels, i, cash, t, income)
-            options.append( optimize(channels, cash_new, t_new, path + [(i, t_new)], upgradeAt ) )
-            channels[i].degrade()
+        for i, _ in enumerate(channels.channels):
+            cash_new, t_new = channels.upgradeAt(i, cash, t)
+            options.append( optimize(channels, cash_new, t_new, path + [(i, t_new)] ) )
+            channels.degrade(i)
         t, path = min( options, key = lambda r: r[0] )
         if t < best:
-            print("best so far: ", t)
-            pprint(path)
             best = t
+            channels.print_path_result(path)
 
     mem.store(key, (t, path))
 
     return t, path
 
-
-
-def main(defs_path, bound, upat_key):
+def main(defs_path, bound):
     global BOUND
     BOUND = bound
     channels = []
@@ -156,15 +174,14 @@ def main(defs_path, bound, upat_key):
 
     print("Starting with following channels:", channels)
 
-    t, path =  optimize(channels, EPSILON, EPSILON, [], UPGRADE_AT[upat_key])
-    print("BEST: ", t)
-    pprint(path)
-
+    channels = Channels(channels)
+    t, path =  optimize(channels, EPSILON, EPSILON, [])
+    print("BEST: ", t, [i for i, t in path])
+    channels.print_path_result(path)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument('--defs', '-d', default="./defs.json", help="Definitions for channel (akak generators)")
-    p.add_argument('--upgrade_at', '-u', default=1, type=int, help="define upgradeAt method to use" )
     p.add_argument('income', type=int, default=200, help="Goal to reach in terms of income [$/s]")
     args = p.parse_args()
-    main(args.defs, args.income, args.upgrade_at)
+    main(args.defs, args.income)
